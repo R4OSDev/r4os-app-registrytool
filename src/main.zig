@@ -1429,24 +1429,58 @@ fn apiSelfTest(app: *App) i32 {
     var facade_key = r4os.RegistryPath.parse("SYSTEM\\RegApiSelftest") catch return apiSelfTestFail(app, had_system_hive, "path-too-long");
 
     if (app.registry_api.setString(&facade_key, "Name", "OK") != .ok) return apiSelfTestFail(app, had_system_hive, "api-selftest-set-string");
+    const first_generation = systemHiveGeneration(app) orelse return apiSelfTestFail(app, had_system_hive, "api-selftest-generation-first");
     if (!expectApiString(app, "SYSTEM\\RegApiSelftest", "Name", "OK")) return apiSelfTestFail(app, had_system_hive, "api-selftest-read-string");
     if (!expectApiEnumValue(app, "SYSTEM\\RegApiSelftest", 0, "Name", r4os.abi.registry_value_type_string)) return apiSelfTestFail(app, had_system_hive, "api-selftest-enum-string");
+    var repeated_read: usize = 0;
+    while (repeated_read < 64) : (repeated_read += 1) {
+        if (!expectApiString(app, "SYSTEM\\RegApiSelftest", "Name", "OK")) return apiSelfTestFail(app, had_system_hive, "api-selftest-generation-read");
+    }
+    if (systemHiveGeneration(app) != first_generation) return apiSelfTestFail(app, had_system_hive, "api-selftest-generation-read-drift");
+
+    const conflict_path = hiveBakPathZ(.system, pathScratch(0)) orelse return apiSelfTestFail(app, had_system_hive, "api-selftest-conflict-path");
+    _ = app.sys.fileDelete(conflict_path);
+    if (app.sys.dirCreate(conflict_path) < 0) return apiSelfTestFail(app, had_system_hive, "api-selftest-conflict-create");
+    const raw_key_path = makeZ("SYSTEM\\RegApiSelftest", pathScratch(1)) orelse return apiSelfTestFail(app, had_system_hive, "api-selftest-conflict-key");
+    const raw_count_name = makeZ("Count", pathScratch(2)) orelse return apiSelfTestFail(app, had_system_hive, "api-selftest-conflict-name");
+    if (app.sys.registrySetU32(raw_key_path, raw_count_name, 46) != r4os.abi.registry_api_result_io)
+        return apiSelfTestFail(app, had_system_hive, "api-selftest-conflict-result");
+    if (systemHiveGeneration(app) != first_generation or !expectApiMissing(app, "SYSTEM\\RegApiSelftest", "Count"))
+        return apiSelfTestFail(app, had_system_hive, "api-selftest-conflict-publication");
+    const conflict_cleanup_path = hiveBakPathZ(.system, pathScratch(0)) orelse return apiSelfTestFail(app, had_system_hive, "api-selftest-conflict-cleanup-path");
+    if (app.sys.dirDelete(conflict_cleanup_path) <= 0) return apiSelfTestFail(app, had_system_hive, "api-selftest-conflict-cleanup");
 
     if (app.registry_api.setU32(&facade_key, "Count", 46) != .ok) return apiSelfTestFail(app, had_system_hive, "api-selftest-set-u32");
+    if (systemHiveGeneration(app) != nextGeneration(first_generation)) return apiSelfTestFail(app, had_system_hive, "api-selftest-generation-second");
     if (!expectApiU32(app, "SYSTEM\\RegApiSelftest", "Count", 46)) return apiSelfTestFail(app, had_system_hive, "api-selftest-read-u32");
 
     if (app.registry_api.delete(&facade_key, "Name") != .ok) return apiSelfTestFail(app, had_system_hive, "api-selftest-delete-string");
+    if (systemHiveGeneration(app) != nextGeneration(nextGeneration(first_generation))) return apiSelfTestFail(app, had_system_hive, "api-selftest-generation-third");
     if (!expectApiMissing(app, "SYSTEM\\RegApiSelftest", "Name")) return apiSelfTestFail(app, had_system_hive, "api-selftest-missing-string");
 
     if (app.registry_api.delete(&facade_key, "Count") != .ok) return apiSelfTestFail(app, had_system_hive, "api-selftest-delete-u32");
+    if (systemHiveGeneration(app) != nextGeneration(nextGeneration(nextGeneration(first_generation)))) return apiSelfTestFail(app, had_system_hive, "api-selftest-generation-fourth");
     if (!expectApiMissing(app, "SYSTEM\\RegApiSelftest", "Count")) return apiSelfTestFail(app, had_system_hive, "api-selftest-missing-u32");
     restoreApiSelfTest(app, had_system_hive);
 
     app.line("REG inactive root selftest: OK");
     app.line("REG missing system hive selftest: OK");
     app.line("REG corrupt system hive selftest: OK");
+    app.line("REG generation cache selftest: OK reads=64 publications=4");
+    app.line("REG commit failure selftest: OK generation=unchanged partial=none");
     app.line("REG api selftest: OK");
     return 0;
+}
+
+fn systemHiveGeneration(app: *App) ?u64 {
+    const loaded = loadHiveSilent(app, .system);
+    if (!loaded.valid) return null;
+    return loaded.view.?.header.generation;
+}
+
+fn nextGeneration(generation: u64) u64 {
+    const next = generation +% 1;
+    return if (next == 0) 1 else next;
 }
 
 fn apiSelfTestFail(app: *App, restore_original: bool, text: []const u8) i32 {

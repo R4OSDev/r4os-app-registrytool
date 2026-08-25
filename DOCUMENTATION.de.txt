@@ -23,3 +23,8 @@ Contract:
 - App-Klasse: `console`
 - Zielpfad im Image: `C:\R4OS\SOFTWARE\TERMINAL\REG.R4X`
 
+`REG APITEST` prueft seit 0.1.3 neben negativen Hivezustaenden und den
+typisierten Einzeloperationen auch 64 wiederholte Reads einer unveraenderten
+Generation. Ein absichtlich blockierter Backupname erzwingt ausserdem einen
+Commitfehler; weder Dateigeneration noch sichtbarer Cachezustand duerfen sich
+dabei teilweise aendern.
