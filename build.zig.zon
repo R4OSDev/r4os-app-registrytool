@@ -1,6 +1,6 @@
 .{
     .name = .r4os_reg,
-    .version = "0.1.2",
+    .version = "0.1.4",
     .fingerprint = 0x9fec2786c124ff47,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{

@@ -16,6 +16,7 @@ const path_pool_max: usize = 16384;
 const key_depth_max: usize = 32;
 const key_build_max: usize = 256;
 const value_collect_max: usize = 512;
+const migrate_batch_max: usize = r4os.abi.registry_batch_operation_max;
 
 var empty_buffer: [0]u8 = .{};
 var hive_buffer: []u8 = empty_buffer[0..];
@@ -34,6 +35,8 @@ var value_collect_buffer: [value_collect_max]registry.BuildValue = [_]registry.B
 var key_build_buffer: [key_build_max]BuildKey = [_]BuildKey{empty_build_key} ** key_build_max;
 var value_key_index_buffer: [value_collect_max]u32 = [_]u32{registry.invalid_index} ** value_collect_max;
 var flat_key_order_buffer: [key_build_max]u32 = [_]u32{registry.invalid_index} ** key_build_max;
+var migrate_batch_operations: [migrate_batch_max]r4os.abi.RegistryBatchOperation =
+    [_]r4os.abi.RegistryBatchOperation{.{}} ** migrate_batch_max;
 
 pub fn r4_app_main(contract: *r4os.App) i32 {
     if (!r4std.init(contract.startContext())) return r4os.abi.err_no_group;
@@ -1132,11 +1135,20 @@ fn migrateConfigFile(app: *App, target: MigrateTarget, source_path_text: []const
 fn migrateConfigBytes(app: *App, target: MigrateTarget, bytes_raw: []const u8) ?usize {
     if (!validateSettingsDocument(app, bytes_raw, migrateSchema(target))) return null;
 
+    const use_batch = app.registry_api.batchAvailable();
+    var batch = r4os.RegistryBatchBuilder.init(migrate_batch_operations[0..], path_pool_buffer[0..]);
     var count: usize = 0;
     var iter = settings.EntryIterator.init(bytes_raw);
     while (iter.next()) |entry| {
         if (equalsIgnoreCase(entry.key, settings.format_key) or equalsIgnoreCase(entry.key, settings.schema_key)) continue;
-        const ok = switch (target) {
+        if (use_batch and batch.operation_count == migrate_batch_operations.len) {
+            if (!flushMigrationBatch(app, &batch)) return null;
+        }
+        const ok = if (use_batch) switch (target) {
+            .assoc => migrateAssocEntryBatch(app, &batch, entry),
+            .time => migrateTimeEntryBatch(app, &batch, entry),
+            .desktop => migrateDesktopEntryBatch(app, &batch, entry),
+        } else switch (target) {
             .assoc => migrateAssocEntry(app, entry),
             .time => migrateTimeEntry(app, entry),
             .desktop => migrateDesktopEntry(app, entry),
@@ -1146,7 +1158,16 @@ fn migrateConfigBytes(app: *App, target: MigrateTarget, bytes_raw: []const u8) ?
     }
 
     if (count == 0) return migrateFailCount(app, "migrate-empty-config");
+    if (use_batch and !flushMigrationBatch(app, &batch)) return null;
     return count;
+}
+
+fn flushMigrationBatch(app: *App, batch: *r4os.RegistryBatchBuilder) bool {
+    if (batch.operation_count == 0) return true;
+    const applied = app.registry_api.applyBatch(batch);
+    if (!applied.committed()) return migrateFailBool(app, "migrate-batch-failed");
+    batch.reset();
+    return true;
 }
 
 fn validateSettingsDocument(app: *App, bytes_raw: []const u8, expected_schema: []const u8) bool {
@@ -1201,8 +1222,33 @@ fn migrateAssocEntry(app: *App, entry: settings.Entry) bool {
     return migrateSetStringPath(app, "SYSTEM\\Software\\R4OS\\Associations\\Raw", entry.key, entry.value);
 }
 
+fn migrateAssocEntryBatch(app: *App, batch: *r4os.RegistryBatchBuilder, entry: settings.Entry) bool {
+    if (startsWithIgnoreCase(entry.key, "APP.")) {
+        const setting = splitPrefixedSetting(entry.key, "APP.") orelse return migrateFailBool(app, "migrate-bad-assoc-key");
+        if (!validName(setting.id, false) or !validName(setting.field, false)) return migrateFailBool(app, "migrate-bad-assoc-key");
+        const key_path = makePrefixedZ("SYSTEM\\Software\\R4OS\\Apps\\", setting.id, pathScratch(0)) orelse return migrateFailBool(app, "path-too-long");
+        return migrateBatchSetString(app, batch, zSlice(key_path), assocAppFieldName(setting.field), entry.value);
+    }
+    if (startsWithIgnoreCase(entry.key, "EXT.")) {
+        const setting = splitPrefixedSetting(entry.key, "EXT.") orelse return migrateFailBool(app, "migrate-bad-assoc-key");
+        if (!validName(setting.id, false) or !validName(setting.field, false)) return migrateFailBool(app, "migrate-bad-assoc-key");
+        const key_path = makePrefixedZ("SYSTEM\\Software\\Classes\\.", setting.id, pathScratch(0)) orelse return migrateFailBool(app, "path-too-long");
+        const field_name = assocExtFieldName(setting.field);
+        if (equalsIgnoreCase(setting.field, "RANK")) {
+            const rank = settings.parseU32(entry.value) orelse return migrateFailBool(app, "migrate-bad-rank");
+            return migrateBatchSetU32(app, batch, zSlice(key_path), field_name, rank);
+        }
+        return migrateBatchSetString(app, batch, zSlice(key_path), field_name, entry.value);
+    }
+    return migrateBatchSetString(app, batch, "SYSTEM\\Software\\R4OS\\Associations\\Raw", entry.key, entry.value);
+}
+
 fn migrateTimeEntry(app: *App, entry: settings.Entry) bool {
     return migrateSetStringPath(app, "SYSTEM\\System\\Time", entry.key, entry.value);
+}
+
+fn migrateTimeEntryBatch(app: *App, batch: *r4os.RegistryBatchBuilder, entry: settings.Entry) bool {
+    return migrateBatchSetString(app, batch, "SYSTEM\\System\\Time", entry.key, entry.value);
 }
 
 fn migrateDesktopEntry(app: *App, entry: settings.Entry) bool {
@@ -1218,6 +1264,39 @@ fn migrateDesktopEntry(app: *App, entry: settings.Entry) bool {
         return migrateSetU32Path(app, "SYSTEM\\Shell\\Desktop\\Settings", entry.key, value);
     }
     return migrateSetStringPath(app, "SYSTEM\\Shell\\Desktop\\Settings", entry.key, entry.value);
+}
+
+fn migrateDesktopEntryBatch(app: *App, batch: *r4os.RegistryBatchBuilder, entry: settings.Entry) bool {
+    if (equalsIgnoreCase(entry.key, "TASKBAR_CLOCK")) {
+        const value = settings.parseBool(entry.value) orelse return migrateFailBool(app, "migrate-bad-bool");
+        return migrateBatchSetBool(app, batch, "SYSTEM\\Shell\\Desktop\\Settings", entry.key, value);
+    }
+    if (equalsIgnoreCase(entry.key, "UI_FONT_SIZE") or
+        equalsIgnoreCase(entry.key, "TERMINAL_FONT_SIZE") or
+        equalsIgnoreCase(entry.key, "TERMINAL_CODEPAGE"))
+    {
+        const value = settings.parseU32(entry.value) orelse return migrateFailBool(app, "migrate-bad-u32");
+        return migrateBatchSetU32(app, batch, "SYSTEM\\Shell\\Desktop\\Settings", entry.key, value);
+    }
+    return migrateBatchSetString(app, batch, "SYSTEM\\Shell\\Desktop\\Settings", entry.key, entry.value);
+}
+
+fn migrateBatchSetString(app: *App, batch: *r4os.RegistryBatchBuilder, key_path_text: []const u8, value_name: []const u8, value: []const u8) bool {
+    const key_path = r4os.RegistryPath.parse(key_path_text) catch return migrateFailBool(app, "path-too-long");
+    batch.setString(&key_path, value_name, value) catch return migrateFailBool(app, "migrate-batch-capacity");
+    return true;
+}
+
+fn migrateBatchSetU32(app: *App, batch: *r4os.RegistryBatchBuilder, key_path_text: []const u8, value_name: []const u8, value: u32) bool {
+    const key_path = r4os.RegistryPath.parse(key_path_text) catch return migrateFailBool(app, "path-too-long");
+    batch.setU32(&key_path, value_name, value) catch return migrateFailBool(app, "migrate-batch-capacity");
+    return true;
+}
+
+fn migrateBatchSetBool(app: *App, batch: *r4os.RegistryBatchBuilder, key_path_text: []const u8, value_name: []const u8, value: bool) bool {
+    const key_path = r4os.RegistryPath.parse(key_path_text) catch return migrateFailBool(app, "path-too-long");
+    batch.setBool(&key_path, value_name, value) catch return migrateFailBool(app, "migrate-batch-capacity");
+    return true;
 }
 
 fn migrateSetStringPath(app: *App, key_path_text: []const u8, value_name_text: []const u8, value: []const u8) bool {
@@ -1262,8 +1341,14 @@ fn migrateSelfTest(app: *App) i32 {
     cleanupHiveFiles(app, .system);
 
     _ = migrateConfigBytes(app, .assoc, migrate_assoc_selftest) orelse return migrateSelfTestFail(app, had_system, "migrate-selftest-assoc");
+    const assoc_generation = systemHiveGeneration(app) orelse return migrateSelfTestFail(app, had_system, "migrate-selftest-assoc-generation");
     _ = migrateConfigBytes(app, .time, migrate_time_selftest) orelse return migrateSelfTestFail(app, had_system, "migrate-selftest-time");
+    const time_generation = systemHiveGeneration(app) orelse return migrateSelfTestFail(app, had_system, "migrate-selftest-time-generation");
     _ = migrateConfigBytes(app, .desktop, migrate_desktop_selftest) orelse return migrateSelfTestFail(app, had_system, "migrate-selftest-desktop");
+    const desktop_generation = systemHiveGeneration(app) orelse return migrateSelfTestFail(app, had_system, "migrate-selftest-desktop-generation");
+    if (app.registry_api.batchAvailable() and
+        (time_generation != nextGeneration(assoc_generation) or desktop_generation != nextGeneration(time_generation)))
+        return migrateSelfTestFail(app, had_system, "migrate-selftest-batch-generation");
 
     if (!expectStringValue(app, "SYSTEM\\Software\\R4OS\\Apps\\NOTEPAD", "Path", "C:\\R4OS\\SOFTWARE\\DESKTOP\\NOTEPAD.R4X")) return migrateSelfTestFail(app, had_system, "migrate-selftest-app-path");
     if (!expectStringValue(app, "SYSTEM\\Software\\Classes\\.TXT", "DefaultApp", "NOTEPAD")) return migrateSelfTestFail(app, had_system, "migrate-selftest-ext-app");
@@ -1274,6 +1359,7 @@ fn migrateSelfTest(app: *App) i32 {
     if (!expectU32Value(app, "SYSTEM\\Shell\\Desktop\\Settings", "TERMINAL_CODEPAGE", 437)) return migrateSelfTestFail(app, had_system, "migrate-selftest-codepage");
 
     restoreMigrateSelfTest(app, had_system);
+    if (app.registry_api.batchAvailable()) app.line("REG migrate batch selftest: OK documents=3 generations=3");
     app.line("REG migrate selftest: OK");
     return 0;
 }
@@ -1421,6 +1507,9 @@ fn apiSelfTest(app: *App) i32 {
 
     if (!app.sys.hasFn("registry_get_value")) return apiSelfTestFail(app, had_system_hive, "api-selftest-read-api-missing");
     if (!app.sys.hasFn("registry_set_value")) return apiSelfTestFail(app, had_system_hive, "api-selftest-write-api-missing");
+    if (!app.sys.hasFn("registry_snapshot_begin") or !app.sys.hasFn("registry_snapshot_page"))
+        return apiSelfTestFail(app, had_system_hive, "api-selftest-snapshot-api-missing");
+    if (!app.sys.hasFn("registry_batch_mutate")) return apiSelfTestFail(app, had_system_hive, "api-selftest-batch-api-missing");
     if (!expectApiInactiveRoot(app)) return apiSelfTestFail(app, had_system_hive, "api-selftest-inactive-root");
     if (!expectApiMissingSystemHive(app)) return apiSelfTestFail(app, had_system_hive, "api-selftest-missing-system-hive");
     if (!expectApiCorruptSystemHive(app)) return apiSelfTestFail(app, had_system_hive, "api-selftest-corrupt-system-hive");
@@ -1461,6 +1550,7 @@ fn apiSelfTest(app: *App) i32 {
     if (app.registry_api.delete(&facade_key, "Count") != .ok) return apiSelfTestFail(app, had_system_hive, "api-selftest-delete-u32");
     if (systemHiveGeneration(app) != nextGeneration(nextGeneration(nextGeneration(first_generation)))) return apiSelfTestFail(app, had_system_hive, "api-selftest-generation-fourth");
     if (!expectApiMissing(app, "SYSTEM\\RegApiSelftest", "Count")) return apiSelfTestFail(app, had_system_hive, "api-selftest-missing-u32");
+    if (!registrySnapshotBatchSelfTest(app)) return apiSelfTestFail(app, had_system_hive, "api-selftest-snapshot-batch");
     restoreApiSelfTest(app, had_system_hive);
 
     app.line("REG inactive root selftest: OK");
@@ -1468,8 +1558,133 @@ fn apiSelfTest(app: *App) i32 {
     app.line("REG corrupt system hive selftest: OK");
     app.line("REG generation cache selftest: OK reads=64 publications=4");
     app.line("REG commit failure selftest: OK generation=unchanged partial=none");
+    app.line("REG snapshot batch selftest: OK pages=5 restarts=1 operations=32");
     app.line("REG api selftest: OK");
     return 0;
+}
+
+fn registrySnapshotBatchSelfTest(app: *App) bool {
+    const batch_count: usize = @intCast(r4os.abi.registry_batch_operation_max);
+    const batch_key = r4os.RegistryPath.parse("SYSTEM\\RegApiBatch") catch return false;
+    var operation_storage: [r4os.abi.registry_batch_operation_max]r4os.abi.RegistryBatchOperation =
+        [_]r4os.abi.RegistryBatchOperation{.{}} ** r4os.abi.registry_batch_operation_max;
+    var blob_storage: [2048]u8 = undefined;
+    var builder = r4os.RegistryBatchBuilder.init(operation_storage[0..], blob_storage[0..]);
+    var name_storage: [7]u8 = undefined;
+    var index: usize = 0;
+    while (index < batch_count) : (index += 1) {
+        builder.setU32(&batch_key, batchValueName(&name_storage, index), @intCast(index)) catch return false;
+    }
+    const generation_before = systemHiveGeneration(app) orelse return false;
+    const seeded = app.registry_api.applyBatch(&builder);
+    if (!seeded.committed() or seeded.result.operation_count != r4os.abi.registry_batch_operation_max or
+        seeded.result.generation_before != generation_before or seeded.result.generation_after != nextGeneration(generation_before))
+        return false;
+
+    var snapshot_open = app.registry_api.beginSnapshot(&batch_key, .values);
+    var interrupted = switch (snapshot_open) {
+        .snapshot => |snapshot| snapshot,
+        else => return false,
+    };
+    var page_entries: [7]r4os.abi.RegistrySnapshotEntry = [_]r4os.abi.RegistrySnapshotEntry{.{}} ** 7;
+    var page_data: [28]u8 = .{0} ** 28;
+    var page: r4os.abi.RegistrySnapshotPageInfo = .{};
+    if (interrupted.page(page_entries[0..], page_data[0..], &page) != r4os.abi.registry_api_result_ok or
+        page.status != r4os.abi.registry_snapshot_status_more or page.returned != 7)
+        return false;
+
+    var trigger_key_buf: [path_max + 1]u8 = undefined;
+    var trigger_name_buf: [path_max + 1]u8 = undefined;
+    const trigger_key = makeZ("SYSTEM\\RegApiBatchTrigger", trigger_key_buf[0..]) orelse return false;
+    const trigger_name = makeZ("Tick", trigger_name_buf[0..]) orelse return false;
+    if (app.sys.registrySetU32(trigger_key, trigger_name, 1) != r4os.abi.registry_api_result_ok) return false;
+    page = .{};
+    if (interrupted.page(page_entries[0..], page_data[0..], &page) != r4os.abi.registry_api_result_ok or
+        page.status != r4os.abi.registry_snapshot_status_restart or page.returned != 0 or interrupted.cursor.restarts != 1)
+        return false;
+
+    snapshot_open = app.registry_api.beginSnapshot(&batch_key, .values);
+    var stable = switch (snapshot_open) {
+        .snapshot => |snapshot| snapshot,
+        else => return false,
+    };
+    const stable_generation = stable.cursor.generation;
+    var seen: usize = 0;
+    var pages: usize = 0;
+    while (true) {
+        page = .{};
+        if (stable.page(page_entries[0..], page_data[0..], &page) != r4os.abi.registry_api_result_ok) return false;
+        if (page.generation != stable_generation or page.total != r4os.abi.registry_batch_operation_max or
+            (page.status != r4os.abi.registry_snapshot_status_more and page.status != r4os.abi.registry_snapshot_status_complete))
+            return false;
+        const returned: usize = @intCast(page.returned);
+        var page_index: usize = 0;
+        while (page_index < returned) : (page_index += 1) {
+            const entry = &page_entries[page_index];
+            const expected_index = seen + page_index;
+            if (!fixedZEquals(entry.name[0..], batchValueName(&name_storage, expected_index)) or
+                entry.value_type != r4os.abi.registry_value_type_u32 or entry.data_len != 4 or
+                (entry.flags & r4os.abi.registry_snapshot_entry_flag_data_present) == 0)
+                return false;
+            const data_offset: usize = @intCast(entry.data_offset);
+            const page_data_len: usize = @intCast(page.data_bytes);
+            if (data_offset + 4 > page_data_len or readU32(page_data[0..], data_offset) != @as(u32, @intCast(expected_index))) return false;
+        }
+        seen += returned;
+        pages += 1;
+        if (page.status == r4os.abi.registry_snapshot_status_complete) break;
+    }
+    if (seen != batch_count or pages != 5) return false;
+
+    var abort_operations: [2]r4os.abi.RegistryBatchOperation = undefined;
+    var abort_blob: [128]u8 = undefined;
+    var abort_builder = r4os.RegistryBatchBuilder.init(abort_operations[0..], abort_blob[0..]);
+    const abort_key = r4os.RegistryPath.parse("SYSTEM\\RegApiBatchAbort") catch return false;
+    abort_builder.setU32(&abort_key, "Good", 1) catch return false;
+    abort_builder.setU32(&abort_key, "Bad", 2) catch return false;
+    abort_operations[1].value_type = 0xffff;
+    const abort_generation = systemHiveGeneration(app) orelse return false;
+    var abort_result: r4os.abi.RegistryBatchResult = .{};
+    if (app.sys.registryBatchMutate(abort_operations[0..], abort_builder.blob(), &abort_result) != r4os.abi.registry_api_result_invalid or
+        abort_result.status != r4os.abi.registry_batch_status_validation_failed or abort_result.failed_index != 1 or
+        systemHiveGeneration(app) != abort_generation or
+        !expectApiMissing(app, "SYSTEM\\RegApiBatchAbort", "Good") or !expectApiMissing(app, "SYSTEM\\RegApiBatchAbort", "Bad"))
+        return false;
+
+    const conflict_path = hiveBakPathZ(.system, pathScratch(0)) orelse return false;
+    _ = app.sys.fileDelete(conflict_path);
+    if (app.sys.dirCreate(conflict_path) < 0) return false;
+    var commit_operations: [2]r4os.abi.RegistryBatchOperation = undefined;
+    var commit_blob: [128]u8 = undefined;
+    var commit_builder = r4os.RegistryBatchBuilder.init(commit_operations[0..], commit_blob[0..]);
+    const commit_key = r4os.RegistryPath.parse("SYSTEM\\RegApiBatchCommit") catch return false;
+    commit_builder.setU32(&commit_key, "First", 1) catch return false;
+    commit_builder.setU32(&commit_key, "Second", 2) catch return false;
+    const commit_generation = systemHiveGeneration(app) orelse return false;
+    const commit_failed = app.registry_api.applyBatch(&commit_builder);
+    if (commit_failed.raw_code != r4os.abi.registry_api_result_io or
+        commit_failed.result.status != r4os.abi.registry_batch_status_commit_failed or
+        systemHiveGeneration(app) != commit_generation or
+        !expectApiMissing(app, "SYSTEM\\RegApiBatchCommit", "First") or !expectApiMissing(app, "SYSTEM\\RegApiBatchCommit", "Second"))
+        return false;
+    const conflict_cleanup = hiveBakPathZ(.system, pathScratch(0)) orelse return false;
+    if (app.sys.dirDelete(conflict_cleanup) <= 0) return false;
+
+    builder.reset();
+    index = 0;
+    while (index < batch_count) : (index += 1) {
+        builder.delete(&batch_key, batchValueName(&name_storage, index)) catch return false;
+    }
+    if (!app.registry_api.applyBatch(&builder).committed()) return false;
+    if (app.sys.registryDeleteValue(trigger_key, trigger_name) != r4os.abi.registry_api_result_ok) return false;
+    return true;
+}
+
+fn batchValueName(out: *[7]u8, index: usize) []const u8 {
+    out.* = .{ 'V', 'a', 'l', 'u', 'e', '0', '0' };
+    out[5] = '0' + @as(u8, @intCast(index / 10));
+    out[6] = '0' + @as(u8, @intCast(index % 10));
+    return out[0..];
 }
 
 fn systemHiveGeneration(app: *App) ?u64 {

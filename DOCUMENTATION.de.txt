@@ -1,30 +1,32 @@
 ﻿REG.R4X
 =======
 
-REG.R4X ist das Terminal-Werkzeug fuer Registry-Operationen und Registry-
-Abnahmen.
+REG.R4X ist das Terminal-Werkzeug fuer Registry-Operationen, R4S-Migrationen
+und Registry-Abnahmen. `module.R4MF` ist die Wahrheit fuer Artefakt, Version,
+Zielpfad und Imports.
 
-Projektstruktur seit 0.51.18:
-- `build.zig` baut die App als eigenes SDK-Projekt.
-- `build.zig.zon` bindet `r4os_sdk` als Paket.
-- `module.R4MF` beschreibt Artefakt, Zielpfad und Contract.
+Build im Repository `Repositories/Apps/RegistryTool`:
 
-Build:
+    Build.bat
+    ./Build.sh
 
-    cd Code\System\Software\RegistryTool
-    ..\..\..\DevTools\Zig\zig.exe build
+Seit 0.1.4 sammelt `REG MIGRATE` die Werte eines R4S-Dokuments in begrenzten
+Batchs mit hoechstens 32 Operationen und 16384 Blobbytes. Die produktive
+ASSOC-Konfiguration wird dadurch in wenigen atomaren Generationen statt mit
+einem Commit je Wert uebernommen. Fehlt der optionale Batchslot auf einem
+aelteren Kernel, bleiben die bisherigen typisierten Einzeloperationen der
+kompatible Fallback.
 
-Ergebnis:
-
-    Code\System\Software\RegistryTool\zig-out\REG.R4X
+`REG APITEST` prueft negative Hivezustaende, die alten Einzeloperationen,
+64 wiederholte Cache-Reads sowie den neuen Vertrag: 32 Werte werden atomar
+gesetzt, mit Seitengroesse sieben in fuenf direkten Seiten gelesen, eine
+Generationsaenderung erzwingt einen expliziten Neustart, und Validierungs-
+sowie Commitfehler lassen weder einen Teilwert noch eine neue sichtbare
+Generation zurueck. `REG MIGRATESELFTEST` belegt zusaetzlich genau eine neue
+Generation je kleinem Testdokument.
 
 Contract:
-- R4XStart-Entry: `reg_main`
+- Entry-Modus: `app`
 - App-Klasse: `console`
-- Zielpfad im Image: `C:\R4OS\SOFTWARE\TERMINAL\REG.R4X`
-
-`REG APITEST` prueft seit 0.1.3 neben negativen Hivezustaenden und den
-typisierten Einzeloperationen auch 64 wiederholte Reads einer unveraenderten
-Generation. Ein absichtlich blockierter Backupname erzwingt ausserdem einen
-Commitfehler; weder Dateigeneration noch sichtbarer Cachezustand duerfen sich
-dabei teilweise aendern.
+- Imports: `R4SYS:Query:1`, `R4STD:SETTINGS_V1:1`
+- Zielpfad: `C:\R4OS\SOFTWARE\TERMINAL\REG.R4X`
