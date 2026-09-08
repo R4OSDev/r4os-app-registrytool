@@ -4,13 +4,17 @@
 
 ## Package
 
-- Version: `0.1.4`
+- Version: `0.1.5`
 - Image target: `/R4OS/SOFTWARE/TERMINAL/REG.R4X`
 - Image scope: `full`
 - Canonical project manifest: `module.R4MF`
 
 The manifest is the single source of truth for the artifact, imports, image
 target, and package metadata.
+
+`REG SET` and `REG DELETE` use the shared value transaction, preserving other
+writers and resident deferred changes. Text import uses the shared bounded
+hive builder; its explicit whole-file publication remains separate.
 
 R4S migrations use bounded atomic registry batches when supported and retain
 the legacy typed single-value fallback. `REG APITEST` covers stable paged

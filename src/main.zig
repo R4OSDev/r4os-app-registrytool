@@ -18,15 +18,15 @@ const key_build_max: usize = 256;
 const value_collect_max: usize = 512;
 const migrate_batch_max: usize = r4os.abi.registry_batch_operation_max;
 
-var empty_buffer: [0]u8 = .{};
-var hive_buffer: []u8 = empty_buffer[0..];
-var export_buffer: []u8 = empty_buffer[0..];
-var import_buffer: []u8 = empty_buffer[0..];
-var migrate_buffer: []u8 = empty_buffer[0..];
-var write_alloc_buffer: []u8 = empty_buffer[0..];
-var set_data_buffer: []u8 = empty_buffer[0..];
-var path_pool_buffer: []u8 = empty_buffer[0..];
-var selftest_buffer: []u8 = empty_buffer[0..];
+var empty_buffer: [0]u8 align(16) = .{};
+var hive_buffer: []align(16) u8 = empty_buffer[0..];
+var export_buffer: []align(16) u8 = empty_buffer[0..];
+var import_buffer: []align(16) u8 = empty_buffer[0..];
+var migrate_buffer: []align(16) u8 = empty_buffer[0..];
+var write_alloc_buffer: []align(16) u8 = empty_buffer[0..];
+var set_data_buffer: []align(16) u8 = empty_buffer[0..];
+var path_pool_buffer: []align(16) u8 = empty_buffer[0..];
+var selftest_buffer: []align(16) u8 = empty_buffer[0..];
 const path_scratch_init: [path_max + 1]u8 = [_]u8{0xa5} ** (path_max + 1);
 const empty_build_value: registry.BuildValue = .{ .key_path = "", .name = "", .value_type = .string, .data = "" };
 const empty_build_key: BuildKey = .{ .parent = registry.invalid_index, .name = "" };
@@ -34,6 +34,7 @@ var path_scratch: [path_scratch_count][path_max + 1]u8 = [_][path_max + 1]u8{pat
 var value_collect_buffer: [value_collect_max]registry.BuildValue = [_]registry.BuildValue{empty_build_value} ** value_collect_max;
 var key_build_buffer: [key_build_max]BuildKey = [_]BuildKey{empty_build_key} ** key_build_max;
 var value_key_index_buffer: [value_collect_max]u32 = [_]u32{registry.invalid_index} ** value_collect_max;
+var value_order_buffer: [value_collect_max]u32 = undefined;
 var flat_key_order_buffer: [key_build_max]u32 = [_]u32{registry.invalid_index} ** key_build_max;
 var migrate_batch_operations: [migrate_batch_max]r4os.abi.RegistryBatchOperation =
     [_]r4os.abi.RegistryBatchOperation{.{}} ** migrate_batch_max;
@@ -113,7 +114,7 @@ fn freeScratch(app: *App) void {
     freeScratchBuffer(app, &selftest_buffer);
 }
 
-fn freeScratchBuffer(app: *App, buffer: *[]u8) void {
+fn freeScratchBuffer(app: *App, buffer: *[]align(16) u8) void {
     if (buffer.*.len != 0) {
         app.allocator.free(buffer.*);
         buffer.* = empty_buffer[0..];
@@ -214,11 +215,7 @@ const ValueList = struct {
     }
 };
 
-const BuildKey = struct {
-    parent: u32,
-    name: []const u8,
-    flat_index: u32 = registry.invalid_index,
-};
+const BuildKey = registry.BuildKey;
 
 const MigrateTarget = enum {
     assoc,
@@ -425,19 +422,9 @@ fn setValue(app: *App, rest_raw: []const u8) i32 {
     const value_type = parseValueType(type_part.token) orelse return fail(app, "bad-type");
     const data = parseSetData(value_type, data_text, set_data_buffer[0..]) orelse return fail(app, "bad-data");
 
-    const existing = loadHiveSilent(app, parsed.kind);
-    if (existing.present and !existing.valid) return 1;
-
-    var list = ValueList.init();
-    var target_key_index: ?u32 = null;
-    if (existing.view) |hive| {
-        target_key_index = hive.findKey(key_part.token);
-        if (!collectExistingValues(app, hive, &list, target_key_index, value_part.token, false)) return 1;
-    }
-    if (!list.append(key_part.token, value_part.token, value_type, data)) return fail(app, "too-many-values");
-
-    const generation = if (existing.view) |hive| hive.header.generation + 1 else 1;
-    return buildAndCommit(app, parsed.kind, generation, list.items());
+    const key = r4os.RegistryPath.parse(key_part.token) catch return fail(app, "bad-path");
+    const name = makeZ(value_part.token, pathScratch(0)) orelse return fail(app, "bad-name");
+    return reportMutation(app, app.registry_api.setValue(&key, name, @intFromEnum(value_type), data), "SET");
 }
 
 fn deleteValue(app: *App, rest_raw: []const u8) i32 {
@@ -452,13 +439,27 @@ fn deleteValue(app: *App, rest_raw: []const u8) i32 {
 
     const parsed = registry.parseRoot(key_part.token) orelse return fail(app, "bad-root");
     if (!activeHiveKind(parsed.kind)) return fail(app, "inactive-root");
-    const hive = loadHive(app, parsed.kind) orelse return 1;
-    const key_index = hive.findKey(key_part.token) orelse return fail(app, "key-not-found");
-    _ = hive.findValue(key_index, value_part.token) orelse return fail(app, "value-not-found");
+    const key = r4os.RegistryPath.parse(key_part.token) catch return fail(app, "bad-path");
+    const name = makeZ(value_part.token, pathScratch(0)) orelse return fail(app, "bad-name");
+    return reportMutation(app, app.registry_api.delete(&key, name), "DELETE");
+}
 
-    var list = ValueList.init();
-    if (!collectExistingValues(app, hive, &list, key_index, value_part.token, false)) return 1;
-    return buildAndCommit(app, parsed.kind, hive.header.generation + 1, list.items());
+fn reportMutation(app: *App, result: r4os.app_storage.Operation, command: []const u8) i32 {
+    switch (result) {
+        .ok => {
+            app.write("REG ");
+            app.write(command);
+            app.line(": OK");
+            return 0;
+        },
+        .missing => return fail(app, "value-not-found"),
+        .failure => |code| {
+            app.write("REG: transaction failed rc=");
+            app.sys.printI32(code);
+            app.line("");
+            return 1;
+        },
+    }
 }
 
 fn importHive(app: *App, rest_raw: []const u8) i32 {
@@ -652,198 +653,13 @@ fn keyPathForBuild(hive: registry.HiveView, key_index: u32, list: *ValueList) ?[
     return path_pool_buffer[start..list.path_len];
 }
 
-fn buildAndCommit(app: *App, kind: registry.HiveKind, generation: u64, values: []const registry.BuildValue) i32 {
-    const bytes = buildHiveFixed(app, kind, generation, values) orelse return 1;
-    return commitHiveBytes(app, kind, bytes);
-}
-
 fn buildHiveFixed(app: *App, kind: registry.HiveKind, generation: u64, values: []const registry.BuildValue) ?[]const u8 {
-    if (values.len > value_collect_buffer.len) return buildFail(app, "too-many-values");
-    resetWriteAllocator();
-
-    var key_count: u32 = 1;
-    key_build_buffer[0] = .{ .parent = registry.invalid_index, .name = "" };
-
-    var value_index: usize = 0;
-    while (value_index < values.len) : (value_index += 1) {
-        if (!validValuePayload(values[value_index].value_type, values[value_index].data)) return buildFail(app, "bad-data");
-        if (!validName(values[value_index].name, true)) return buildFail(app, "BadName");
-        const key_index = ensureBuildKey(kind, values[value_index].key_path, &key_count) orelse return buildFail(app, "InvalidPath");
-        var prior: usize = 0;
-        while (prior < value_index) : (prior += 1) {
-            if (value_key_index_buffer[prior] == key_index and equalsIgnoreCase(values[prior].name, values[value_index].name)) {
-                return buildFail(app, "DuplicateValue");
-            }
-        }
-        value_key_index_buffer[value_index] = key_index;
-    }
-
-    var flat_count: u32 = 0;
-    flat_key_order_buffer[flat_count] = 0;
-    key_build_buffer[0].flat_index = 0;
-    flat_count += 1;
-    var cursor: u32 = 0;
-    while (cursor < flat_count) : (cursor += 1) {
-        const parent = flat_key_order_buffer[cursor];
-        var child: u32 = 1;
-        while (child < key_count) : (child += 1) {
-            if (key_build_buffer[child].parent == parent) {
-                key_build_buffer[child].flat_index = flat_count;
-                flat_key_order_buffer[flat_count] = child;
-                flat_count += 1;
-            }
-        }
-    }
-
-    var string_heap_size: usize = 0;
-    var data_heap_size: usize = 0;
-    var flat_i: u32 = 0;
-    while (flat_i < flat_count) : (flat_i += 1) {
-        const build_i = flat_key_order_buffer[flat_i];
-        string_heap_size += key_build_buffer[build_i].name.len;
-        value_index = 0;
-        while (value_index < values.len) : (value_index += 1) {
-            if (value_key_index_buffer[value_index] == build_i) {
-                string_heap_size += values[value_index].name.len;
-                data_heap_size += values[value_index].data.len;
-            }
-        }
-    }
-
-    const key_table_offset = registry.header_size;
-    const key_table_size = @as(usize, key_count) * registry.key_record_size;
-    const value_table_offset = key_table_offset + key_table_size;
-    const value_table_size = values.len * registry.value_record_size;
-    const string_heap_offset = value_table_offset + value_table_size;
-    const data_heap_offset = string_heap_offset + string_heap_size;
-    const file_size = data_heap_offset + data_heap_size;
-    if (file_size > write_alloc_buffer.len or file_size > import_buffer.len) return buildFail(app, "hive-too-large");
-
-    var zero_index: usize = 0;
-    while (zero_index < file_size) : (zero_index += 1) write_alloc_buffer[zero_index] = 0;
-
-    var string_cursor: usize = 0;
-    var data_cursor: usize = 0;
-    var flat_value_index: u32 = 0;
-    flat_i = 0;
-    while (flat_i < flat_count) : (flat_i += 1) {
-        const build_i = flat_key_order_buffer[flat_i];
-        const key = key_build_buffer[build_i];
-        const name_offset = appendBuildString(key.name, string_heap_offset, &string_cursor) orelse return buildFail(app, "hive-too-large");
-        const child_info = childRangeForFlat(build_i, key_count);
-        const value_info = valueRangeForBuild(values, build_i);
-        const first_value = if (value_info.count == 0) registry.invalid_index else flat_value_index;
-        writeKeyRecord(
-            write_alloc_buffer[0..],
-            key_table_offset + @as(usize, flat_i) * registry.key_record_size,
-            if (key.parent == registry.invalid_index) registry.invalid_index else key_build_buffer[key.parent].flat_index,
-            name_offset,
-            @intCast(key.name.len),
-            first_value,
-            value_info.count,
-            child_info.first,
-            child_info.count,
-        );
-
-        value_index = 0;
-        while (value_index < values.len) : (value_index += 1) {
-            if (value_key_index_buffer[value_index] != build_i) continue;
-            const value = values[value_index];
-            const value_name_offset = appendBuildString(value.name, string_heap_offset, &string_cursor) orelse return buildFail(app, "hive-too-large");
-            const data_offset = appendBuildData(value.data, data_heap_offset, &data_cursor) orelse return buildFail(app, "hive-too-large");
-            writeValueRecord(
-                write_alloc_buffer[0..],
-                value_table_offset + @as(usize, flat_value_index) * registry.value_record_size,
-                flat_i,
-                value_name_offset,
-                @intCast(value.name.len),
-                value.value_type,
-                data_offset,
-                @intCast(value.data.len),
-            );
-            flat_value_index += 1;
-        }
-    }
-
-    @memcpy(write_alloc_buffer[0..4], registry.magic);
-    writeU16(write_alloc_buffer[0..], 4, 1);
-    writeU16(write_alloc_buffer[0..], 6, @intCast(registry.header_size));
-    writeU16(write_alloc_buffer[0..], 8, 1);
-    writeU16(write_alloc_buffer[0..], 10, @intFromEnum(kind));
-    writeU64(write_alloc_buffer[0..], 16, @intCast(file_size));
-    writeU64(write_alloc_buffer[0..], 24, generation);
-    writeU32(write_alloc_buffer[0..], 32, @intCast(key_table_offset));
-    writeU32(write_alloc_buffer[0..], 36, key_count);
-    writeU32(write_alloc_buffer[0..], 40, @intCast(value_table_offset));
-    writeU32(write_alloc_buffer[0..], 44, @intCast(values.len));
-    writeU32(write_alloc_buffer[0..], 48, @intCast(string_heap_offset));
-    writeU32(write_alloc_buffer[0..], 52, @intCast(string_heap_size));
-    writeU32(write_alloc_buffer[0..], 56, @intCast(data_heap_offset));
-    writeU32(write_alloc_buffer[0..], 60, @intCast(data_heap_size));
-
-    const bytes = write_alloc_buffer[0..file_size];
-    _ = registry.HiveView.parse(bytes) catch |err| {
-        app.write("REG: generated hive invalid: ");
-        app.write(@errorName(err));
-        app.line("");
-        return null;
-    };
-    return bytes;
-}
-
-const RangeInfo = struct {
-    first: u32,
-    count: u32,
-};
-
-fn childRangeForFlat(build_index: u32, key_count: u32) RangeInfo {
-    var first: u32 = registry.invalid_index;
-    var count: u32 = 0;
-    var index: u32 = 1;
-    while (index < key_count) : (index += 1) {
-        if (key_build_buffer[index].parent == build_index) {
-            if (first == registry.invalid_index) first = key_build_buffer[index].flat_index;
-            count += 1;
-        }
-    }
-    return .{ .first = first, .count = count };
-}
-
-fn valueRangeForBuild(values: []const registry.BuildValue, build_index: u32) RangeInfo {
-    var count: u32 = 0;
-    var index: usize = 0;
-    while (index < values.len) : (index += 1) {
-        if (value_key_index_buffer[index] == build_index) count += 1;
-    }
-    return .{ .first = registry.invalid_index, .count = count };
-}
-
-fn ensureBuildKey(kind: registry.HiveKind, path: []const u8, key_count: *u32) ?u32 {
-    const parsed = registry.parseRoot(path) orelse return null;
-    if (parsed.kind != kind) return null;
-    var current: u32 = 0;
-    var rest = parsed.rest;
-    while (nextPathComponent(&rest)) |component| {
-        if (!validName(component, false)) return null;
-        if (findBuildChild(current, component, key_count.*)) |child| {
-            current = child;
-            continue;
-        }
-        if (key_count.* >= key_build_buffer.len) return null;
-        const next_index = key_count.*;
-        key_build_buffer[next_index] = .{ .parent = current, .name = component };
-        key_count.* += 1;
-        current = next_index;
-    }
-    return current;
-}
-
-fn findBuildChild(parent: u32, name: []const u8, key_count: u32) ?u32 {
-    var index: u32 = 1;
-    while (index < key_count) : (index += 1) {
-        if (key_build_buffer[index].parent == parent and equalsIgnoreCase(key_build_buffer[index].name, name)) return index;
-    }
-    return null;
+    return registry.buildHiveInto(write_alloc_buffer, .{
+        .keys = &key_build_buffer,
+        .value_key_indices = &value_key_index_buffer,
+        .flat_key_order = &flat_key_order_buffer,
+        .value_order = &value_order_buffer,
+    }, kind, generation, values) catch |err| return buildFail(app, @errorName(err));
 }
 
 fn nextPathComponent(rest: *[]const u8) ?[]const u8 {
@@ -866,23 +682,6 @@ fn trimSeparators(text_raw: []const u8) []const u8 {
     return text;
 }
 
-fn appendBuildString(text: []const u8, heap_offset: usize, cursor: *usize) ?u32 {
-    if (text.len > 0xffff) return null;
-    const start = cursor.*;
-    if (heap_offset + start + text.len > write_alloc_buffer.len) return null;
-    if (text.len != 0) @memcpy(write_alloc_buffer[heap_offset + start .. heap_offset + start + text.len], text);
-    cursor.* += text.len;
-    return @intCast(start);
-}
-
-fn appendBuildData(data: []const u8, heap_offset: usize, cursor: *usize) ?u32 {
-    const start = cursor.*;
-    if (heap_offset + start + data.len > write_alloc_buffer.len) return null;
-    if (data.len != 0) @memcpy(write_alloc_buffer[heap_offset + start .. heap_offset + start + data.len], data);
-    cursor.* += data.len;
-    return @intCast(start);
-}
-
 fn buildFail(app: *App, text: []const u8) ?[]const u8 {
     _ = fail(app, text);
     return null;
@@ -891,16 +690,6 @@ fn buildFail(app: *App, text: []const u8) ?[]const u8 {
 fn importFail(app: *App, text: []const u8) ?ImportedHive {
     _ = fail(app, text);
     return null;
-}
-
-fn validValuePayload(value_type: registry.ValueType, data: []const u8) bool {
-    switch (value_type) {
-        .string, .binary => return true,
-        .u32 => return data.len == 4,
-        .u64 => return data.len == 8,
-        .bool => return data.len == 1 and (data[0] == 0 or data[0] == 1),
-        .multi_string => return validMultiString(data),
-    }
 }
 
 fn validMultiString(data: []const u8) bool {
@@ -965,10 +754,6 @@ fn commitHiveBytes(app: *App, kind: registry.HiveKind, bytes: []const u8) i32 {
     app.write(spanZPtr(hive_path));
     app.line("");
     return 0;
-}
-
-fn resetWriteAllocator() void {
-    for (write_alloc_buffer[0..]) |*byte| byte.* = 0x96;
 }
 
 fn printKey(app: *App, hive: registry.HiveView, key_index: u32) void {
