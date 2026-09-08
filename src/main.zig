@@ -104,14 +104,14 @@ fn scratchFail(app: *App) bool {
 }
 
 fn freeScratch(app: *App) void {
-    freeScratchBuffer(app, &hive_buffer);
-    freeScratchBuffer(app, &export_buffer);
-    freeScratchBuffer(app, &import_buffer);
-    freeScratchBuffer(app, &migrate_buffer);
-    freeScratchBuffer(app, &write_alloc_buffer);
-    freeScratchBuffer(app, &set_data_buffer);
-    freeScratchBuffer(app, &path_pool_buffer);
     freeScratchBuffer(app, &selftest_buffer);
+    freeScratchBuffer(app, &path_pool_buffer);
+    freeScratchBuffer(app, &set_data_buffer);
+    freeScratchBuffer(app, &write_alloc_buffer);
+    freeScratchBuffer(app, &migrate_buffer);
+    freeScratchBuffer(app, &import_buffer);
+    freeScratchBuffer(app, &export_buffer);
+    freeScratchBuffer(app, &hive_buffer);
 }
 
 fn freeScratchBuffer(app: *App, buffer: *[]align(16) u8) void {
@@ -306,6 +306,7 @@ fn usage(app: *App) void {
     app.line("  REG APITEST");
     app.line("  REG WRITESELFTEST");
     app.line("  REG MIGRATESELFTEST");
+    app.line("  Writing selftests require the private Test image (TEMP\\REGTEST.R4S).");
     app.line("");
     app.line("Roots: SYSTEM");
     app.line("Types: string, u32, u64, bool, binary, multi_string");
@@ -1124,7 +1125,7 @@ fn migrateApiOk(app: *App, result: i32, text: []const u8) bool {
 }
 
 fn migrateSelfTest(app: *App) i32 {
-    deleteMigrateSelfTestTemps(app);
+    if (!r4os.registry_selftest.privateImage(&app.sys)) return fail(app, "private-test-image-required");
 
     const had_system = backupMigrateHive(app, .system) orelse return fail(app, "migrate-selftest-backup-system");
     cleanupHiveFiles(app, .system);
@@ -1147,14 +1148,14 @@ fn migrateSelfTest(app: *App) i32 {
     if (!expectBoolValue(app, "SYSTEM\\Shell\\Desktop\\Settings", "TASKBAR_CLOCK", true)) return migrateSelfTestFail(app, had_system, "migrate-selftest-clock");
     if (!expectU32Value(app, "SYSTEM\\Shell\\Desktop\\Settings", "TERMINAL_CODEPAGE", 437)) return migrateSelfTestFail(app, had_system, "migrate-selftest-codepage");
 
-    restoreMigrateSelfTest(app, had_system);
+    if (!restoreMigrateSelfTest(app, had_system)) return fail(app, "migrate-selftest-restore-failed; check REGSYS.SAV");
     if (app.registry_api.batchAvailable()) app.line("REG migrate batch selftest: OK documents=3 generations=3");
     app.line("REG migrate selftest: OK");
     return 0;
 }
 
 fn migrateSelfTestFail(app: *App, had_system: bool, text: []const u8) i32 {
-    restoreMigrateSelfTest(app, had_system);
+    if (!restoreMigrateSelfTest(app, had_system)) app.line("REG: restore failed; check REGSYS.SAV");
     return fail(app, text);
 }
 
@@ -1162,21 +1163,8 @@ fn backupMigrateHive(app: *App, kind: registry.HiveKind) ?bool {
     return backupHiveFile(app, kind);
 }
 
-fn restoreMigrateSelfTest(app: *App, had_system: bool) void {
-    restoreMigrateHive(app, .system, had_system);
-    deleteMigrateSelfTestTemps(app);
-}
-
-fn restoreMigrateHive(app: *App, kind: registry.HiveKind, restore_original: bool) void {
-    restoreHiveFile(app, kind, restore_original);
-}
-
-fn deleteMigrateSelfTestTemps(app: *App) void {
-    deleteMigrateBackup(app, .system);
-}
-
-fn deleteMigrateBackup(app: *App, kind: registry.HiveKind) void {
-    deleteHiveBackup(app, kind);
+fn restoreMigrateSelfTest(app: *App, had_system: bool) bool {
+    return restoreHiveFile(app, .system, had_system);
 }
 
 fn parseMigrateTarget(text: []const u8) ?MigrateTarget {
@@ -1262,8 +1250,9 @@ fn migrateFailCount(app: *App, text: []const u8) ?usize {
 }
 
 fn writeSelfTest(app: *App) i32 {
+    if (!r4os.registry_selftest.privateImage(&app.sys)) return fail(app, "private-test-image-required");
+    if (app.sys.fileRead("C:\\TEMP\\RGWST.R4T", export_buffer) != -3) return fail(app, "write-selftest-private-export-in-use");
     _ = app.sys.dirCreate(literalZ("C:\\TEMP", pathScratch(0)) orelse return fail(app, "path-too-long"));
-    deleteLiteralPath(app, "C:\\TEMP\\RGWST.R4T");
 
     const had_system_hive = backupHiveFile(app, .system) orelse return fail(app, "write-selftest-backup");
     if (!had_system_hive) cleanupSystemHiveFiles(app);
@@ -1284,13 +1273,14 @@ fn writeSelfTest(app: *App) i32 {
 
     if (deleteValue(app, "SYSTEM\\RegSelftest Name") != 0) return writeSelfTestFail(app, had_system_hive, "write-selftest-clean-name");
     if (deleteValue(app, "SYSTEM\\RegSelftest Count") != 0) return writeSelfTestFail(app, had_system_hive, "write-selftest-clean-count");
-    restoreWriteSelfTest(app, had_system_hive);
+    if (!restoreWriteSelfTest(app, had_system_hive)) return fail(app, "write-selftest-restore-or-cleanup-failed; check REGSYS.SAV");
 
     app.line("REG write selftest: OK");
     return 0;
 }
 
 fn apiSelfTest(app: *App) i32 {
+    if (!r4os.registry_selftest.privateImage(&app.sys)) return fail(app, "private-test-image-required");
     const had_system_hive = backupHiveFile(app, .system) orelse return fail(app, "api-selftest-backup");
     if (!had_system_hive) cleanupSystemHiveFiles(app);
 
@@ -1340,7 +1330,7 @@ fn apiSelfTest(app: *App) i32 {
     if (systemHiveGeneration(app) != nextGeneration(nextGeneration(nextGeneration(first_generation)))) return apiSelfTestFail(app, had_system_hive, "api-selftest-generation-fourth");
     if (!expectApiMissing(app, "SYSTEM\\RegApiSelftest", "Count")) return apiSelfTestFail(app, had_system_hive, "api-selftest-missing-u32");
     if (!registrySnapshotBatchSelfTest(app)) return apiSelfTestFail(app, had_system_hive, "api-selftest-snapshot-batch");
-    restoreApiSelfTest(app, had_system_hive);
+    if (!restoreApiSelfTest(app, had_system_hive)) return fail(app, "api-selftest-restore-failed; check REGSYS.SAV");
 
     app.line("REG inactive root selftest: OK");
     app.line("REG missing system hive selftest: OK");
@@ -1488,12 +1478,12 @@ fn nextGeneration(generation: u64) u64 {
 }
 
 fn apiSelfTestFail(app: *App, restore_original: bool, text: []const u8) i32 {
-    restoreApiSelfTest(app, restore_original);
+    if (!restoreApiSelfTest(app, restore_original)) app.line("REG: restore failed; check REGSYS.SAV");
     return fail(app, text);
 }
 
-fn restoreApiSelfTest(app: *App, restore_original: bool) void {
-    restoreHiveFile(app, .system, restore_original);
+fn restoreApiSelfTest(app: *App, restore_original: bool) bool {
+    return restoreHiveFile(app, .system, restore_original);
 }
 
 fn expectApiEnumValue(app: *App, key_path_text: []const u8, index: u32, value_name_text: []const u8, value_type: u16) bool {
@@ -1594,13 +1584,13 @@ fn expectApiCorruptSystemHive(app: *App) bool {
 }
 
 fn writeSelfTestFail(app: *App, restore_original: bool, text: []const u8) i32 {
-    restoreWriteSelfTest(app, restore_original);
+    if (!restoreWriteSelfTest(app, restore_original)) app.line("REG: restore or export cleanup failed; check REGSYS.SAV");
     return fail(app, text);
 }
 
-fn restoreWriteSelfTest(app: *App, restore_original: bool) void {
-    restoreHiveFile(app, .system, restore_original);
-    deleteLiteralPath(app, "C:\\TEMP\\RGWST.R4T");
+fn restoreWriteSelfTest(app: *App, restore_original: bool) bool {
+    if (!restoreHiveFile(app, .system, restore_original)) return false;
+    return app.sys.fileDelete("C:\\TEMP\\RGWST.R4T") >= 0;
 }
 
 fn cleanupSystemHiveFiles(app: *App) void {
@@ -1617,29 +1607,23 @@ fn deleteLiteralPath(app: *App, comptime path: []const u8) void {
     _ = app.sys.fileDelete(literalZ(path, pathScratch(0)) orelse return);
 }
 
+const selftest_paths = r4os.registry_selftest.Paths{
+    .hive = "C:\\R4OS\\REGISTRY\\SYSTEM.R4R",
+    .tmp = "C:\\R4OS\\REGISTRY\\SYSTEM.TMP",
+    .bak = "C:\\R4OS\\REGISTRY\\SYSTEM.BAK",
+    .original = "C:\\R4OS\\REGISTRY\\REGSYS.SAV",
+    .stage = "C:\\R4OS\\REGISTRY\\REGSYS.RST",
+    .displaced = "C:\\R4OS\\REGISTRY\\REGSYS.OLD",
+};
+
 fn backupHiveFile(app: *App, kind: registry.HiveKind) ?bool {
-    deleteHiveBackup(app, kind);
-    const hive_path = hivePathZ(kind, pathScratch(0)) orelse return null;
-    if (!app.sys.exists(hive_path)) return false;
-    const backup_path = hiveSelftestBackupPathZ(kind, pathScratch(1)) orelse return null;
-    if (app.sys.fileCopy(hive_path, backup_path) <= 0) return null;
-    return true;
+    if (kind != .system or !app.sys.hasFn("file_replace_atomic")) return null;
+    return r4os.registry_selftest.backup(&app.sys, selftest_paths, hive_buffer, write_alloc_buffer);
 }
 
-fn restoreHiveFile(app: *App, kind: registry.HiveKind, restore_original: bool) void {
-    if (restore_original) {
-        cleanupHiveFiles(app, kind);
-        const backup_path = hiveSelftestBackupPathZ(kind, pathScratch(0)) orelse return;
-        const hive_path = hivePathZ(kind, pathScratch(1)) orelse return;
-        _ = app.sys.fileCopy(backup_path, hive_path);
-    } else {
-        cleanupHiveFiles(app, kind);
-    }
-    deleteHiveBackup(app, kind);
-}
-
-fn deleteHiveBackup(app: *App, kind: registry.HiveKind) void {
-    _ = app.sys.fileDelete(hiveSelftestBackupPathZ(kind, pathScratch(0)) orelse return);
+fn restoreHiveFile(app: *App, kind: registry.HiveKind, restore_original: bool) bool {
+    if (kind != .system) return false;
+    return r4os.registry_selftest.restore(&app.sys, selftest_paths, restore_original, hive_buffer, write_alloc_buffer);
 }
 
 fn expectStringValue(app: *App, key_path: []const u8, value_name: []const u8, expected: []const u8) bool {
@@ -1702,13 +1686,6 @@ fn hiveTmpPathZ(kind: registry.HiveKind, out: []u8) ?[*:0]const u8 {
 fn hiveBakPathZ(kind: registry.HiveKind, out: []u8) ?[*:0]const u8 {
     return switch (kind) {
         .system => literalZ("C:\\R4OS\\REGISTRY\\SYSTEM.BAK", out),
-        else => null,
-    };
-}
-
-fn hiveSelftestBackupPathZ(kind: registry.HiveKind, out: []u8) ?[*:0]const u8 {
-    return switch (kind) {
-        .system => literalZ("C:\\R4OS\\REGISTRY\\REGSYS.SAV", out),
         else => null,
     };
 }
