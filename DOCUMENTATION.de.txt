@@ -37,3 +37,12 @@ bestaetigten residenten Werte. Textimport benutzt nun denselben begrenzten
 Builder wie SDK/Kernel; seine explizite Dateiveroeffentlichung bleibt ein
 separater Folgepunkt. Die Scratch-Slices behalten ihre 16-Byte-Ausrichtung
 bis zur Freigabe, auch bei einem fehlgeschlagenen Teilaufbau.
+
+
+REG-Lesestatus ab 0.78.63
+-----------------------
+Nur -3 gilt als fehlender Hive. Leere, zu grosse und anderweitig nicht
+lesbare Dateien bleiben als vorhandener ungueltiger Bestand erkennbar.
+Die sichtbare Leseausgabe unterscheidet diese Fehler. SET/DELETE verwenden
+bereits seit0.78.27 die gemeinsame Registry-API; dieser transaktionale
+Schreibpfad bleibt unveraendert. Selbsttests folgen gesondert in0.78.64.

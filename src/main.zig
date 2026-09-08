@@ -563,14 +563,14 @@ fn exportHive(app: *App, rest_raw: []const u8) i32 {
 fn loadHive(app: *App, kind: registry.HiveKind) ?registry.HiveView {
     const path = hivePathZ(kind, pathScratch(0)) orelse return null;
     const read = app.sys.fileRead(path, hive_buffer[0..]);
-    if (read <= 0) {
-        app.write("REG: hive missing or unreadable: ");
-        app.write(spanZPtr(path));
-        app.line("");
+    if (read == -5 or read > hive_buffer.len) {
+        app.line("REG: hive too large for REG.R4X buffer");
         return null;
     }
-    if (read >= hive_buffer.len) {
-        app.line("REG: hive too large for REG.R4X buffer");
+    if (read <= 0) {
+        app.write(if (read == -3) "REG: hive missing: " else if (read == 0) "REG: hive empty: " else "REG: hive read failed: ");
+        app.write(spanZPtr(path));
+        app.line("");
         return null;
     }
     return registry.HiveView.parse(hive_buffer[0..@intCast(read)]) catch |err| {
@@ -584,9 +584,13 @@ fn loadHive(app: *App, kind: registry.HiveKind) ?registry.HiveView {
 fn loadHiveSilent(app: *App, kind: registry.HiveKind) LoadedHive {
     const path = hivePathZ(kind, pathScratch(0)) orelse return .{ .present = true };
     const read = app.sys.fileRead(path, hive_buffer[0..]);
-    if (read <= 0) return .{};
-    if (read >= hive_buffer.len) {
+    if (read == -3) return .{};
+    if (read == -5 or read > hive_buffer.len) {
         app.line("REG: hive too large for REG.R4X buffer");
+        return .{ .present = true };
+    }
+    if (read <= 0) {
+        app.line(if (read == 0) "REG: hive is empty" else "REG: hive read failed; existing data retained");
         return .{ .present = true };
     }
     const hive = registry.HiveView.parse(hive_buffer[0..@intCast(read)]) catch |err| {

@@ -4,7 +4,7 @@
 
 ## Package
 
-- Version: `0.1.5`
+- Version: `0.1.6`
 - Image target: `/R4OS/SOFTWARE/TERMINAL/REG.R4X`
 - Image scope: `full`
 - Canonical project manifest: `module.R4MF`
@@ -47,3 +47,12 @@ Detailed German technical notes from the migration are preserved in
 Original R4OS material is licensed under Apache License 2.0. See `LICENSE`
 and `NOTICE`. Any repository-specific external material is documented in
 `THIRD_PARTY_NOTICES.md`.
+
+
+REG-Lesestatus ab 0.78.63
+-----------------------
+Nur -3 gilt als fehlender Hive. Leere, zu grosse und anderweitig nicht
+lesbare Dateien bleiben als vorhandener ungueltiger Bestand erkennbar.
+Die sichtbare Leseausgabe unterscheidet diese Fehler. SET/DELETE verwenden
+bereits seit0.78.27 die gemeinsame Registry-API; dieser transaktionale
+Schreibpfad bleibt unveraendert. Selbsttests folgen gesondert in0.78.64.
