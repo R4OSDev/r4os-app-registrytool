@@ -786,9 +786,16 @@ fn commitHiveBytes(app: *App, kind: registry.HiveKind, bytes: []const u8) i32 {
         if (read_back < 0 or @as(usize, @intCast(read_back)) != bytes.len or !std.mem.eql(u8, import_buffer[0..@intCast(read_back)], bytes)) return fail(app, "stage-verify-failed");
         // REG IMPORT replaces the whole hive and its regular last-hive backup.
         // A failed backup retirement leaves the current target and stage intact.
-        switch (files.delete(backup)) {
-            .ok, .missing => {},
-            .failure => return fail(app, "backup-retirement-failed"),
+        switch (files.metadata(target)) {
+            .found => |value| {
+                if (value.flags & r4os.abi.file_metadata2_flag_directory != 0) return fail(app, "hive-target-is-directory");
+                switch (files.delete(backup)) {
+                    .ok, .missing => {},
+                    .failure => return fail(app, "backup-retirement-failed"),
+                }
+            },
+            .missing => {},
+            .failure => return fail(app, "hive-target-metadata-failed"),
         }
         const published = files.replaceAtomic(target, stage, backup, .{});
         if (published != .ok) {
@@ -2337,6 +2344,7 @@ test "migration registry failed atomic publish retains target and its own stage"
         var published: usize = 0;
         var backup_deleted: usize = 0;
         var foreign_deleted: usize = 0;
+        var target_present = true;
         fn directory(_: [*:0]const u8) callconv(.c) i32 {
             return 1;
         }
@@ -2355,7 +2363,8 @@ test "migration registry failed atomic publish retains target and its own stage"
         fn finish(_: [*:0]const u8, length: u64, _: u32) callconv(.c) i32 {
             return if (length == payload.len) a.file_stream_result_ok else a.file_stream_error_invalid;
         }
-        fn metadata(_: [*:0]const u8, output: *a.FileMetadata2) callconv(.c) i32 {
+        fn metadata(path: [*:0]const u8, output: *a.FileMetadata2) callconv(.c) i32 {
+            if (!target_present and std.mem.eql(u8, std.mem.span(path), "C:\\R4OS\\REGISTRY\\SYSTEM.R4R")) return 0;
             output.* = .{ .flags = a.file_metadata2_flag_exists | a.file_metadata2_flag_byte_size_valid | a.file_metadata2_flag_identity_valid, .byte_size = payload.len, .identity = .{ .mount_generation = 1, .namespace_generation = 1, .object_hi = 2, .object_lo = 3, .flags = a.file_identity2_flag_namespace } };
             return 1;
         }
@@ -2385,6 +2394,7 @@ test "migration registry failed atomic publish retains target and its own stage"
     Peer.published = 0;
     Peer.backup_deleted = 0;
     Peer.foreign_deleted = 0;
+    Peer.target_present = true;
     const platform = r4os.platform2;
     var table = platform.abi.R4XStartR4Sys2{ .dir_create = @intFromPtr(&Peer.directory), .ticks = @intFromPtr(&Peer.ticks), .file_stream_begin = @intFromPtr(&Peer.begin), .file_stream_write = @intFromPtr(&Peer.write), .file_stream_finish = @intFromPtr(&Peer.finish), .file_metadata2 = @intFromPtr(&Peer.metadata), .file_read = @intFromPtr(&Peer.read), .file_delete = @intFromPtr(&Peer.remove), .file_replace_atomic = @intFromPtr(&Peer.publish) };
     const imports = [_]platform.abi.R4XStartImport{.{ .group_id = 1, .resolved_version = 2, .table = @intFromPtr(&table) }};
@@ -2401,4 +2411,12 @@ test "migration registry failed atomic publish retains target and its own stage"
     try std.testing.expectEqual(@as(usize, 1), Peer.backup_deleted);
     try std.testing.expectEqual(@as(usize, 0), Peer.foreign_deleted);
     try std.testing.expect(std.mem.endsWith(u8, std.mem.sliceTo(&Peer.stage, 0), ".TMP"));
+    Peer.stage = @splat(0);
+    Peer.target_present = false;
+    Peer.backup_deleted = 0;
+    Peer.published = 0;
+    try std.testing.expectEqual(@as(i32, 1), commitHiveBytes(&app, .system, payload));
+    try std.testing.expectEqual(@as(usize, 1), Peer.published);
+    try std.testing.expectEqual(@as(usize, 0), Peer.backup_deleted);
+    try std.testing.expectEqual(@as(usize, 0), Peer.foreign_deleted);
 }
