@@ -760,33 +760,48 @@ fn commitHiveBytes(app: *App, kind: registry.HiveKind, bytes: []const u8) i32 {
     _ = app.sys.dirCreate(literalZ("C:\\R4OS", pathScratch(0)) orelse return fail(app, "path-too-long"));
     _ = app.sys.dirCreate(literalZ("C:\\R4OS\\REGISTRY", pathScratch(1)) orelse return fail(app, "path-too-long"));
 
-    const tmp_path = hiveTmpPathZ(kind, pathScratch(2)) orelse return fail(app, "path-too-long");
     const hive_path = hivePathZ(kind, pathScratch(3)) orelse return fail(app, "path-too-long");
     const bak_path = hiveBakPathZ(kind, pathScratch(4)) orelse return fail(app, "path-too-long");
-    _ = app.sys.fileDelete(tmp_path);
-    const written = app.sys.fileWrite(tmp_path, bytes);
-    if (written < 0 or @as(usize, @intCast(written)) != bytes.len) return fail(app, "tmp-write-failed");
-
-    const read_back = app.sys.fileRead(tmp_path, import_buffer[0..]);
-    if (read_back < 0 or @as(usize, @intCast(read_back)) != bytes.len) return fail(app, "tmp-verify-read-failed");
-    _ = registry.HiveView.parse(import_buffer[0..@intCast(read_back)]) catch |err| {
-        app.write("REG: tmp verify failed: ");
-        app.write(@errorName(err));
+    const files = r4os.Files{ .sys = app.sys };
+    const target = r4os.app_storage.PathZ{ .ptr = hive_path, .len = @intCast(std.mem.len(hive_path)) };
+    const backup = r4os.app_storage.PathZ{ .ptr = bak_path, .len = @intCast(std.mem.len(bak_path)) };
+    const seed: u32 = @truncate(app.sys.ticks() ^ @intFromPtr(bytes.ptr));
+    var stage_buffer: [path_max]u8 = undefined;
+    for (0..64) |attempt| {
+        const id = (seed +% @as(u32, @intCast(attempt))) & 0xffffff;
+        const stage_path = std.fmt.bufPrintZ(&stage_buffer, "C:\\R4OS\\REGISTRY\\RG{X:0>6}.TMP", .{id}) catch return fail(app, "path-too-long");
+        const stage = r4os.app_storage.PathZ{ .ptr = stage_path, .len = @intCast(stage_path.len) };
+        var writer = switch (files.streamWriter(stage, r4os.abi.file_stream_open_create)) {
+            .writer => |value| value,
+            .failure => |code| {
+                if (code == r4os.abi.file_stream_error_exists) continue;
+                return fail(app, "stage-open-failed");
+            },
+        };
+        if (writer.write(bytes) != .ok or writer.finish() != .ok) {
+            _ = writer.abort();
+            return fail(app, "stage-write-unconfirmed");
+        }
+        const read_back = readDocument(app, stage_path, import_buffer);
+        if (read_back < 0 or @as(usize, @intCast(read_back)) != bytes.len or !std.mem.eql(u8, import_buffer[0..@intCast(read_back)], bytes)) return fail(app, "stage-verify-failed");
+        // REG IMPORT replaces the whole hive and its regular last-hive backup.
+        // A failed backup retirement leaves the current target and stage intact.
+        switch (files.delete(backup)) {
+            .ok, .missing => {},
+            .failure => return fail(app, "backup-retirement-failed"),
+        }
+        const published = files.replaceAtomic(target, stage, backup, .{});
+        if (published != .ok) {
+            app.write("REG publish unconfirmed; retain stage ");
+            app.line(stage_path);
+            return 1;
+        }
+        app.write("REG wrote: ");
+        app.write(spanZPtr(hive_path));
         app.line("");
-        return 1;
-    };
-
-    if (app.sys.exists(hive_path)) {
-        _ = app.sys.fileDelete(bak_path);
-        if (app.sys.fileCopy(hive_path, bak_path) <= 0) return fail(app, "backup-failed");
-        _ = app.sys.fileDelete(hive_path);
+        return 0;
     }
-    if (app.sys.fileRename(tmp_path, hive_path) <= 0) return fail(app, "replace-failed");
-
-    app.write("REG wrote: ");
-    app.write(spanZPtr(hive_path));
-    app.line("");
-    return 0;
+    return fail(app, "stage-names-exhausted");
 }
 
 fn printKey(app: *App, hive: registry.HiveView, key_index: u32) void {
@@ -2311,4 +2326,79 @@ test "migration registry documents reject wide oversize and changed full identit
     const previous_reads = Peer.data_reads;
     try std.testing.expectEqual(@as(i32, -5), readDocument(&app, "C:\\PRIVATE.R4R", &bytes));
     try std.testing.expectEqual(previous_reads, Peer.data_reads);
+}
+
+test "migration registry failed atomic publish retains target and its own stage" {
+    const a = r4os.abi;
+    const Peer = struct {
+        var payload: []const u8 = "";
+        var stage: [256]u8 = @splat(0);
+        var opened: usize = 0;
+        var published: usize = 0;
+        var backup_deleted: usize = 0;
+        var foreign_deleted: usize = 0;
+        fn directory(_: [*:0]const u8) callconv(.c) i32 {
+            return 1;
+        }
+        fn ticks() callconv(.c) u64 {
+            return 19;
+        }
+        fn begin(path: [*:0]const u8, flags: u32) callconv(.c) i32 {
+            opened += 1;
+            if (flags != a.file_stream_open_create or !r4os.bounded_text.assignZ(&stage, std.mem.span(path))) return a.file_stream_error_invalid;
+            return a.file_stream_result_ok;
+        }
+        fn write(path: [*:0]const u8, offset: u64, input: [*]const u8, count: u32, _: u32) callconv(.c) i32 {
+            if (!std.mem.eql(u8, std.mem.span(path), std.mem.sliceTo(&stage, 0)) or offset != 0 or !std.mem.eql(u8, input[0..count], payload)) return a.file_stream_error_invalid;
+            return @intCast(count);
+        }
+        fn finish(_: [*:0]const u8, length: u64, _: u32) callconv(.c) i32 {
+            return if (length == payload.len) a.file_stream_result_ok else a.file_stream_error_invalid;
+        }
+        fn metadata(_: [*:0]const u8, output: *a.FileMetadata2) callconv(.c) i32 {
+            output.* = .{ .flags = a.file_metadata2_flag_exists | a.file_metadata2_flag_byte_size_valid | a.file_metadata2_flag_identity_valid, .byte_size = payload.len, .identity = .{ .mount_generation = 1, .namespace_generation = 1, .object_hi = 2, .object_lo = 3, .flags = a.file_identity2_flag_namespace } };
+            return 1;
+        }
+        fn read(_: [*:0]const u8, output: [*]u8, capacity: u32) callconv(.c) i32 {
+            if (capacity < payload.len) return -5;
+            @memcpy(output[0..payload.len], payload);
+            return @intCast(payload.len);
+        }
+        fn remove(path: [*:0]const u8) callconv(.c) i32 {
+            if (std.mem.eql(u8, std.mem.span(path), "C:\\R4OS\\REGISTRY\\SYSTEM.BAK")) backup_deleted += 1 else foreign_deleted += 1;
+            return 1;
+        }
+        fn publish(target: [*:0]const u8, staged: [*:0]const u8, backup: [*:0]const u8, flags: u32) callconv(.c) i32 {
+            published += 1;
+            if (!std.mem.eql(u8, std.mem.span(target), "C:\\R4OS\\REGISTRY\\SYSTEM.R4R") or
+                !std.mem.eql(u8, std.mem.span(staged), std.mem.sliceTo(&stage, 0)) or
+                !std.mem.eql(u8, std.mem.span(backup), "C:\\R4OS\\REGISTRY\\SYSTEM.BAK") or flags != r4os.r4sys.file_replace_atomic_flag_consume_stage) return r4os.r4sys.file_replace_atomic_error_invalid;
+            return r4os.r4sys.file_replace_atomic_error_io;
+        }
+    };
+    const values = [_]registry.BuildValue{.{ .key_path = "SYSTEM\\Migration", .name = "Name", .value_type = .string, .data = "A" }};
+    const payload = try r4os.registry.buildHive(std.testing.allocator, .system, 7, &values);
+    defer std.testing.allocator.free(payload);
+    Peer.payload = payload;
+    Peer.stage = @splat(0);
+    Peer.opened = 0;
+    Peer.published = 0;
+    Peer.backup_deleted = 0;
+    Peer.foreign_deleted = 0;
+    const platform = r4os.platform2;
+    var table = platform.abi.R4XStartR4Sys2{ .dir_create = @intFromPtr(&Peer.directory), .ticks = @intFromPtr(&Peer.ticks), .file_stream_begin = @intFromPtr(&Peer.begin), .file_stream_write = @intFromPtr(&Peer.write), .file_stream_finish = @intFromPtr(&Peer.finish), .file_metadata2 = @intFromPtr(&Peer.metadata), .file_read = @intFromPtr(&Peer.read), .file_delete = @intFromPtr(&Peer.remove), .file_replace_atomic = @intFromPtr(&Peer.publish) };
+    const imports = [_]platform.abi.R4XStartImport{.{ .group_id = 1, .resolved_version = 2, .table = @intFromPtr(&table) }};
+    const raw = platform.abi.R4XStartContext2{ .import_count = 1, .imports = @intFromPtr(&imports) };
+    const context = try platform.Context.init(&raw);
+    var app = App{ .sys = r4os.r4sys.Context.fromProgram(.{ .generation2 = &context }), .allocator = std.testing.allocator, .registry_api = undefined };
+    var readback: [512]u8 align(16) = undefined;
+    const previous = import_buffer;
+    defer import_buffer = previous;
+    import_buffer = &readback;
+    try std.testing.expectEqual(@as(i32, 1), commitHiveBytes(&app, .system, payload));
+    try std.testing.expectEqual(@as(usize, 1), Peer.opened);
+    try std.testing.expectEqual(@as(usize, 1), Peer.published);
+    try std.testing.expectEqual(@as(usize, 1), Peer.backup_deleted);
+    try std.testing.expectEqual(@as(usize, 0), Peer.foreign_deleted);
+    try std.testing.expect(std.mem.endsWith(u8, std.mem.sliceTo(&Peer.stage, 0), ".TMP"));
 }

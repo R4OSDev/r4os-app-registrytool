@@ -93,3 +93,7 @@ binden begrenzte Dokumentreads vor und nach dem Lesen. Der Einzelwertpuffer
 entspricht dem vorhandenen32KB-Hivebudget. Damit kann ein regulaerer Export
 mit4488Byte-Binaerwert wieder importiert werden. Die urspruengliche Schreib-
 Export-/Importpruefung deckt diesen Fall auf dem vorhandenen Hive ab.
+Die Importpublikation erzeugt eine eigene create-only8.3-Stagedatei und
+verifiziert alle Bytes. Gemeinsames Atomic Replace publiziert sie mit der
+regulaeren letzten Hivekopie. Eine fehlgeschlagene Publikation behaelt die
+Stagedatei und meldet ein unbestaetigtes Ergebnis.

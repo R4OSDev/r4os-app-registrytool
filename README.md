@@ -103,3 +103,6 @@ fail explicitly. Document reads use whole metadata before and after reading.
 Per-value import scratch now matches the existing32KB hive budget. This
 repairs importing an ordinary export containing a4488-byte binary value.
 The original write/export/import self-test exercises that actual round trip.
+Import publication creates a private create-only short stage and verifies all bytes.
+The shared atomic replace publishes it with the regular last-hive backup.
+A failed publication retains its stage and reports an unconfirmed result.
