@@ -82,3 +82,14 @@ acht teilweisen Scratchallokationen. Ein lokaler SMP4-Gast verwendet eine
 frisch erzeugte private246-Byte-Hive, prueft beide vorhandenen Selbsttests,
 Originalbytes, Cachegeneration1 und Bereinigung. Keine regulaere Installation
 wird als Testbestand verwendet. Belege unter Temp/roadmap-078-execution/07864.
+
+API-Migration 0.90.68
+---------------------
+REG11 verwendet App2/Query2 und technisches R4STD Query2 bei bestehendem
+SETTINGS_V1-Vertrag. ArgumentCursor liest Befehls-/Pfad-/Namens-/Typpraefixe.
+Der Datenrest verwendet seine vorhandene Escape-/Multi-String-Grammatik.
+Ungueltige Praefixquotierung wird explizit abgewiesen. Ganze Metadaten
+binden begrenzte Dokumentreads vor und nach dem Lesen. Der Einzelwertpuffer
+entspricht dem vorhandenen32KB-Hivebudget. Damit kann ein regulaerer Export
+mit4488Byte-Binaerwert wieder importiert werden. Die urspruengliche Schreib-
+Export-/Importpruefung deckt diesen Fall auf dem vorhandenen Hive ab.

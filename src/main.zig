@@ -1,3 +1,4 @@
+const std = @import("std");
 const r4os = @import("r4os");
 const r4std = @import("r4std");
 const registry = r4os.registry_core;
@@ -9,7 +10,7 @@ const import_max: usize = 32768;
 const migrate_max: usize = 32768;
 const write_alloc_max: usize = hive_max;
 const selftest_max: usize = 512;
-const set_data_max: usize = 2048;
+const set_data_max: usize = hive_max;
 const path_max: usize = 256;
 const path_scratch_count: usize = 8;
 const path_pool_max: usize = 16384;
@@ -39,8 +40,8 @@ var flat_key_order_buffer: [key_build_max]u32 = [_]u32{registry.invalid_index} *
 var migrate_batch_operations: [migrate_batch_max]r4os.abi.RegistryBatchOperation =
     [_]r4os.abi.RegistryBatchOperation{.{}} ** migrate_batch_max;
 
-pub fn r4_app_main(contract: *r4os.App) i32 {
-    if (!r4std.init(contract.startContext())) return r4os.abi.err_no_group;
+pub fn r4_app_main(contract: *r4os.App2) i32 {
+    if (!r4std.init2(contract.startContext())) return r4os.abi.err_no_group;
     const allocator = contract.allocator() orelse return r4os.abi.err_no_fn;
     const registry_api = contract.registry() orelse return r4os.abi.err_no_fn;
     var app = App{ .sys = contract.system(), .allocator = allocator, .registry_api = registry_api };
@@ -265,7 +266,7 @@ const migrate_desktop_selftest =
 ;
 
 fn run(app: *App, args: []const u8) i32 {
-    const first = takeToken(args) orelse {
+    const first = (takeToken(args) catch return fail(app, "argument-syntax")) orelse {
         usage(app);
         return 1;
     };
@@ -332,7 +333,7 @@ fn printRoot(app: *App, short: []const u8, long: []const u8, kind: registry.Hive
 }
 
 fn query(app: *App, rest_raw: []const u8) i32 {
-    const path_part = takeToken(rest_raw) orelse {
+    const path_part = (takeToken(rest_raw) catch return fail(app, "argument-syntax")) orelse {
         usage(app);
         return 1;
     };
@@ -340,7 +341,7 @@ fn query(app: *App, rest_raw: []const u8) i32 {
     if (!activeHiveKind(parsed.kind)) return fail(app, "inactive-root");
     const hive = loadHive(app, parsed.kind) orelse return 1;
 
-    if (takeToken(path_part.rest)) |value_part| {
+    if ((takeToken(path_part.rest) catch return fail(app, "argument-syntax"))) |value_part| {
         const key_index = hive.findKey(path_part.token) orelse return fail(app, "key-not-found");
         const value_index = hive.findValue(key_index, value_part.token) orelse return fail(app, "value-not-found");
         printValue(app, hive, hive.valueAt(value_index));
@@ -363,7 +364,7 @@ fn query(app: *App, rest_raw: []const u8) i32 {
 }
 
 fn enumKey(app: *App, rest_raw: []const u8) i32 {
-    const path_part = takeToken(rest_raw) orelse {
+    const path_part = (takeToken(rest_raw) catch return fail(app, "argument-syntax")) orelse {
         usage(app);
         return 1;
     };
@@ -403,15 +404,15 @@ fn enumKey(app: *App, rest_raw: []const u8) i32 {
 }
 
 fn setValue(app: *App, rest_raw: []const u8) i32 {
-    const key_part = takeToken(rest_raw) orelse {
+    const key_part = (takeToken(rest_raw) catch return fail(app, "argument-syntax")) orelse {
         usage(app);
         return 1;
     };
-    const value_part = takeToken(key_part.rest) orelse {
+    const value_part = (takeToken(key_part.rest) catch return fail(app, "argument-syntax")) orelse {
         usage(app);
         return 1;
     };
-    const type_part = takeToken(value_part.rest) orelse {
+    const type_part = (takeToken(value_part.rest) catch return fail(app, "argument-syntax")) orelse {
         usage(app);
         return 1;
     };
@@ -429,11 +430,11 @@ fn setValue(app: *App, rest_raw: []const u8) i32 {
 }
 
 fn deleteValue(app: *App, rest_raw: []const u8) i32 {
-    const key_part = takeToken(rest_raw) orelse {
+    const key_part = (takeToken(rest_raw) catch return fail(app, "argument-syntax")) orelse {
         usage(app);
         return 1;
     };
-    const value_part = takeToken(key_part.rest) orelse {
+    const value_part = (takeToken(key_part.rest) catch return fail(app, "argument-syntax")) orelse {
         usage(app);
         return 1;
     };
@@ -464,12 +465,12 @@ fn reportMutation(app: *App, result: r4os.app_storage.Operation, command: []cons
 }
 
 fn importHive(app: *App, rest_raw: []const u8) i32 {
-    const path_part = takeToken(rest_raw) orelse {
+    const path_part = (takeToken(rest_raw) catch return fail(app, "argument-syntax")) orelse {
         usage(app);
         return 1;
     };
     const path = makeZ(path_part.token, pathScratch(0)) orelse return fail(app, "path-too-long");
-    const read = app.sys.fileRead(path, import_buffer[0..]);
+    const read = readDocument(app, path, import_buffer[0..]);
     if (read <= 0) return fail(app, "import-read-failed");
     if (read >= import_buffer.len) return fail(app, "import-too-large");
 
@@ -534,14 +535,14 @@ fn importTextHiveFixed(app: *App, text_raw: []const u8, generation: u64) ?Import
 }
 
 fn exportHive(app: *App, rest_raw: []const u8) i32 {
-    const root_part = takeToken(rest_raw) orelse {
+    const root_part = (takeToken(rest_raw) catch return fail(app, "argument-syntax")) orelse {
         usage(app);
         return 1;
     };
     const parsed = registry.parseRoot(root_part.token) orelse return fail(app, "bad-root");
     if (!activeHiveKind(parsed.kind)) return fail(app, "inactive-root");
     const hive = loadHive(app, parsed.kind) orelse return 1;
-    const out_path = takeToken(root_part.rest);
+    const out_path = (takeToken(root_part.rest) catch return fail(app, "argument-syntax"));
 
     var out = ExportOut{
         .app = app,
@@ -561,9 +562,36 @@ fn exportHive(app: *App, rest_raw: []const u8) i32 {
     return 0;
 }
 
+// All consumers parse only a complete, bounded document with the same
+// full file identity before and after its synchronous read.
+fn readDocument(app: *App, path: [*:0]const u8, output: []u8) i32 {
+    const files = r4os.Files{ .sys = app.sys };
+    const file_path = r4os.app_storage.PathZ{ .ptr = path, .len = @intCast(std.mem.len(path)) };
+    const before = switch (files.metadata(file_path)) {
+        .missing => return -3,
+        .failure => |code| return code,
+        .found => |value| value,
+    };
+    if (before.flags & r4os.abi.file_metadata2_flag_directory != 0) return -4;
+    if (before.flags & r4os.abi.file_metadata2_flag_byte_size_valid == 0) return r4os.abi.file_metadata2_error_unsupported;
+    if (before.byte_size > output.len) return -5;
+    const count: u32 = switch (files.read(file_path, output)) {
+        .bytes => |value| value,
+        .end => 0,
+        .failure => |code| return code,
+    };
+    const after = switch (files.metadata(file_path)) {
+        .found => |value| value,
+        .missing => return r4os.abi.file_metadata2_error_restart,
+        .failure => |code| return code,
+    };
+    if (count != before.byte_size or !std.meta.eql(before, after)) return r4os.abi.file_metadata2_error_restart;
+    return @intCast(count);
+}
+
 fn loadHive(app: *App, kind: registry.HiveKind) ?registry.HiveView {
     const path = hivePathZ(kind, pathScratch(0)) orelse return null;
-    const read = app.sys.fileRead(path, hive_buffer[0..]);
+    const read = readDocument(app, path, hive_buffer[0..]);
     if (read == -5 or read > hive_buffer.len) {
         app.line("REG: hive too large for REG.R4X buffer");
         return null;
@@ -584,7 +612,7 @@ fn loadHive(app: *App, kind: registry.HiveKind) ?registry.HiveView {
 
 fn loadHiveSilent(app: *App, kind: registry.HiveKind) LoadedHive {
     const path = hivePathZ(kind, pathScratch(0)) orelse return .{ .present = true };
-    const read = app.sys.fileRead(path, hive_buffer[0..]);
+    const read = readDocument(app, path, hive_buffer[0..]);
     if (read == -3) return .{};
     if (read == -5 or read > hive_buffer.len) {
         app.line("REG: hive too large for REG.R4X buffer");
@@ -886,7 +914,7 @@ fn selfTest(app: *App) i32 {
 }
 
 fn migrateCommand(app: *App, rest_raw: []const u8) i32 {
-    const target_part = takeToken(rest_raw) orelse {
+    const target_part = (takeToken(rest_raw) catch return fail(app, "argument-syntax")) orelse {
         usage(app);
         return 1;
     };
@@ -909,7 +937,7 @@ fn migrateCommand(app: *App, rest_raw: []const u8) i32 {
 
 fn migrateConfigFile(app: *App, target: MigrateTarget, source_path_text: []const u8) i32 {
     const source_path = makeZ(source_path_text, pathScratch(0)) orelse return fail(app, "path-too-long");
-    const read = app.sys.fileRead(source_path, migrate_buffer[0..]);
+    const read = readDocument(app, source_path, migrate_buffer[0..]);
     if (read <= 0) return fail(app, "migrate-read-failed");
     if (read >= migrate_buffer.len) return fail(app, "migrate-too-large");
 
@@ -2035,21 +2063,12 @@ fn writeDecOut(out: *ExportOut, value: u64) void {
     out.write(buf[pos..]);
 }
 
-fn takeToken(text_raw: []const u8) ?Token {
+fn takeToken(text_raw: []const u8) r4os.arguments.Error!?Token {
     const text = trim(text_raw);
-    if (text.len == 0) return null;
-    if (text[0] == '"') {
-        var index: usize = 1;
-        while (index < text.len) : (index += 1) {
-            if (text[index] == '"') {
-                return .{ .token = text[1..index], .rest = text[index + 1 ..] };
-            }
-        }
-        return .{ .token = text[1..], .rest = "" };
-    }
-    var index: usize = 0;
-    while (index < text.len and !isSpace(text[index])) : (index += 1) {}
-    return .{ .token = text[0..index], .rest = text[index..] };
+    var detail: r4os.arguments.Failure = .{};
+    var cursor = try r4os.arguments.ArgCursor.init(text, .{ .switches = 0 }, &detail);
+    const part = (try cursor.next()) orelse return null;
+    return .{ .token = try part.bytes(text), .rest = try cursor.remainingRaw() };
 }
 
 fn makeZ(text: []const u8, out: []u8) ?[*:0]const u8 {
@@ -2228,4 +2247,68 @@ fn writeValueRecord(out: []u8, offset: usize, owner: u32, name_offset: u32, name
     writeU16(out, offset + 10, @intFromEnum(value_type));
     writeU32(out, offset + 16, data_offset);
     writeU32(out, offset + 20, data_len);
+}
+
+test "migration registry arguments retain exact data tails and large binary values" {
+    const input = "\"SYSTEM\\Ä中\" Name multi_string (\"one\",\"two\")";
+    const key = (try takeToken(input)).?;
+    try std.testing.expectEqualStrings("SYSTEM\\Ä中", key.token);
+    const name = (try takeToken(key.rest)).?;
+    const kind = (try takeToken(name.rest)).?;
+    try std.testing.expectEqualStrings("multi_string", kind.token);
+    try std.testing.expectEqualStrings(" (\"one\",\"two\")", kind.rest);
+    try std.testing.expectError(error.UnclosedQuote, takeToken("\"SYSTEM\\A"));
+    try std.testing.expectError(error.InvalidQuote, takeToken("\"SYSTEM\\A\"suffix"));
+    const encoded = [_]u8{'A'} ** (4488 * 2);
+    var storage: [set_data_max]u8 = undefined;
+    const data = parseSetData(.binary, &encoded, &storage) orelse return error.ExistingBinaryValueClipped;
+    try std.testing.expectEqual(@as(usize, 4488), data.len);
+    for (data) |byte| try std.testing.expectEqual(@as(u8, 0xAA), byte);
+}
+
+test "migration registry documents reject wide oversize and changed full identity" {
+    const a = r4os.abi;
+    const Peer = struct {
+        var size: u64 = 2;
+        var changed = false;
+        var metadata_reads: usize = 0;
+        var data_reads: usize = 0;
+        fn metadata(_: [*:0]const u8, output: *a.FileMetadata2) callconv(.c) i32 {
+            metadata_reads += 1;
+            output.* = .{
+                .flags = a.file_metadata2_flag_exists | a.file_metadata2_flag_identity_valid | a.file_metadata2_flag_byte_size_valid,
+                .identity = .{ .mount_generation = 0x1_0000_0001, .namespace_generation = 0x2_0000_0001, .object_hi = if (changed and metadata_reads > 1) 0x4_0000_0001 else 0x3_0000_0001, .object_lo = 3, .flags = a.file_identity2_flag_namespace },
+                .byte_size = size,
+            };
+            return 1;
+        }
+        fn read(_: [*:0]const u8, output: [*]u8, capacity: u32) callconv(.c) i32 {
+            data_reads += 1;
+            if (capacity < 2) return -5;
+            output[0] = 'A';
+            output[1] = 'B';
+            return 2;
+        }
+    };
+    Peer.size = 2;
+    Peer.changed = false;
+    Peer.metadata_reads = 0;
+    Peer.data_reads = 0;
+    const platform = r4os.platform2;
+    var table = platform.abi.R4XStartR4Sys2{ .file_metadata2 = @intFromPtr(&Peer.metadata), .file_read = @intFromPtr(&Peer.read) };
+    const imports = [_]platform.abi.R4XStartImport{.{ .group_id = 1, .resolved_version = 2, .table = @intFromPtr(&table) }};
+    const raw = platform.abi.R4XStartContext2{ .import_count = 1, .imports = @intFromPtr(&imports) };
+    const context = try platform.Context.init(&raw);
+    var app = App{ .sys = r4os.r4sys.Context.fromProgram(.{ .generation2 = &context }), .allocator = std.testing.allocator, .registry_api = undefined };
+    var bytes: [16]u8 = undefined;
+    try std.testing.expectEqual(@as(i32, 2), readDocument(&app, "C:\\PRIVATE.R4R", &bytes));
+    try std.testing.expectEqualStrings("AB", bytes[0..2]);
+    Peer.changed = true;
+    Peer.metadata_reads = 0;
+    try std.testing.expectEqual(a.file_metadata2_error_restart, readDocument(&app, "C:\\PRIVATE.R4R", &bytes));
+    Peer.size = 0x1_0000_0002;
+    Peer.metadata_reads = 0;
+    const previous_reads = Peer.data_reads;
+    try std.testing.expectEqual(@as(i32, -5), readDocument(&app, "C:\\PRIVATE.R4R", &bytes));
+    try std.testing.expectEqual(previous_reads, Peer.data_reads);
 }

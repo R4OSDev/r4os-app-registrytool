@@ -4,7 +4,7 @@
 
 ## Package
 
-- Version: `0.1.9`
+- Version: `0.1.11`
 - Image target: `/R4OS/SOFTWARE/TERMINAL/REG.R4X`
 - Image scope: `full`
 - Canonical project manifest: `module.R4MF`
@@ -92,3 +92,14 @@ acht teilweisen Scratchallokationen. Ein lokaler SMP4-Gast verwendet eine
 frisch erzeugte private246-Byte-Hive, prueft beide vorhandenen Selbsttests,
 Originalbytes, Cachegeneration1 und Bereinigung. Keine regulaere Installation
 wird als Testbestand verwendet. Belege unter Temp/roadmap-078-execution/07864.
+
+API migration 0.90.68
+---------------------
+REG uses normal App2/Query2 and the technical R4STD Query2 binding. Its named
+SETTINGS_V1 interface keeps the independent library version. The shared
+argument cursor consumes command/key/name/type prefixes. The original typed
+data tail keeps its escaping and multi-string grammar. Invalid prefix quotes
+fail explicitly. Document reads use whole metadata before and after reading.
+Per-value import scratch now matches the existing32KB hive budget. This
+repairs importing an ordinary export containing a4488-byte binary value.
+The original write/export/import self-test exercises that actual round trip.
