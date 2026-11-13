@@ -28,7 +28,7 @@ Generation je kleinem Testdokument.
 Contract:
 - Entry-Modus: `app`
 - App-Klasse: `console`
-- Imports: `R4SYS:Query:1`, `R4STD:SETTINGS_V1:1`
+- Imports: `R4SYS:Query2:2`, `R4STD:SETTINGS_V1:1`
 - Zielpfad: `C:\R4OS\SOFTWARE\TERMINAL\REG.R4X`
 
 Seit 0.1.5 laufen REG SET/DELETE ueber die gemeinsame Registry-Transaktion.
